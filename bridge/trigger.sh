@@ -1,19 +1,28 @@
 #!/bin/sh
-# WebDAV 已经把文件写完后由 dav_provider.py 调用。
-# 多个连续 PUT 合并成一次桥扫描；桥本身还有文件锁，重复触发也不会并发写。
+# WebDAV 写完进度文件后调用；连续 PUT 合并成一次桥扫描。
 set -eu
 
 DATA=/data/.reading-progress-bridge
 LOCK=/var/tmp/reading-progress-bridge/event-trigger.lock
+LOG=/var/tmp/reading-progress-bridge/run.log
 mkdir -p "$(dirname "$LOCK")"
 
-# 给 book.db / JSON 的原子替换和后续请求留一点时间。
 sleep "${RPB_EVENT_DEBOUNCE:-5}"
 
-if mkdir "$LOCK" 2>/dev/null; then
-    trap 'rmdir "$LOCK" 2>/dev/null || true' EXIT INT TERM
-    exec python3 "$DATA/bridge.py" sync >>/var/tmp/reading-progress-bridge/run.log 2>&1
+if ! mkdir "$LOCK" 2>/dev/null; then
+    printf '%s event trigger skipped: another run is active\n' "$(date '+%F %T')" >>"$LOG"
+    exit 0
 fi
 
-# 已有一次触发在处理，交给它；五分钟兜底会再检查。
-exit 0
+cleanup() {
+    rmdir "$LOCK" 2>/dev/null || true
+}
+trap cleanup EXIT INT TERM
+
+printf '%s event trigger started\n' "$(date '+%F %T')" >>"$LOG"
+set +e
+python3 "$DATA/bridge.py" sync >>"$LOG" 2>&1
+status=$?
+set -e
+printf '%s event trigger finished status=%s\n' "$(date '+%F %T')" "$status" >>"$LOG"
+exit "$status"
