@@ -1,0 +1,99 @@
+--- a/dav_provider.py
++++ b/dav_provider.py
+@@ -10,6 +10,34 @@
+ from wsgidav.dav_provider import DAVCollection, DAVNonCollection, DAVProvider
+ from wsgidav.fs_dav_provider import FilesystemProvider
+ 
++
++class UserSyncFilesystemProvider(FilesystemProvider):
++    """FilesystemProvider mounted below the public /reader URL prefix."""
++
++    def __init__(self, root_folder, url_prefix, share_path="/books"):
++        super().__init__(root_folder, readonly=False, fs_opts={})
++        self.url_prefix = url_prefix.rstrip("/") or "/"
++        self.set_share_path(share_path)
++
++    def _relative_path(self, path):
++        if self.url_prefix != "/":
++            if path == self.url_prefix:
++                return "/"
++            prefix = self.url_prefix + "/"
++            if path.startswith(prefix):
++                return path[len(self.url_prefix):]
++        return path
++
++    def get_resource_inst(self, path, environ):
++        resource = super().get_resource_inst(self._relative_path(path), environ)
++        if resource is not None:
++            resource.path = path
++        return resource
++
++    def _loc_to_file_path(self, path, environ=None):
++        return super()._loc_to_file_path(self._relative_path(path), environ)
++
++
+ from webserver import loader
+ from webserver.i18n import _
+ 
+@@ -278,10 +306,19 @@
+         if user_id not in self._user_fs_providers:
+             path = self._get_user_sync_path(user_id)
+             self._ensure_sync_folder(path)
+-            self._user_fs_providers[user_id] = FilesystemProvider(path)
++            self._user_fs_providers[user_id] = UserSyncFilesystemProvider(
++                path, "/" + self.sync_folder_name
++            )
+             logging.info(f"Created FilesystemProvider for user {user_id}: {path}")
+         return self._user_fs_providers[user_id]
+ 
++    @staticmethod
++    def _fs_environ(environ, fs_provider):
++        """Bind WsgiDAV resources to the per-user filesystem provider."""
++        fs_environ = environ.copy()
++        fs_environ["wsgidav.provider"] = fs_provider
++        return fs_environ
++
+     def _ensure_sync_folder(self, folder_path):
+         try:
+             if not os.path.exists(folder_path):
+@@ -357,7 +394,9 @@
+                 if user_id:
+                     try:
+                         fs_provider = self._get_or_create_fs_provider(user_id)
+-                        sync_resource = fs_provider.get_resource_inst("/", environ)
++                        sync_resource = fs_provider.get_resource_inst(
++                            "/", self._fs_environ(environ, fs_provider)
++                        )
+                         if sync_resource:
+                             sync_resource.path = f"/{self.sync_folder_name}"
+                             children.append(sync_resource)
+@@ -385,7 +424,9 @@
+             if not fs_path:
+                 fs_path = "/"
+             logging.debug(f"Mapping WebDAV path {path} -> user {user_id} fs path: {fs_path}")
+-            resource = fs_provider.get_resource_inst(fs_path, environ)
++            resource = fs_provider.get_resource_inst(
++                fs_path, self._fs_environ(environ, fs_provider)
++            )
+             if resource:
+                 resource.path = path
+                 return resource
+@@ -419,7 +460,9 @@
+                         fs_path = "/"
+                     try:
+                         fs_provider = self._get_or_create_fs_provider(user_id)
+-                        return fs_provider.get_resource_inst(fs_path, environ)
++                        return fs_provider.get_resource_inst(
++                            fs_path, self._fs_environ(environ, fs_provider)
++                        )
+                     except Exception as e:
+                         logging.error(f"Failed to handle as filesystem path: {e}")
+             return None
+@@ -739,4 +782,6 @@
+         else:
+             fs_path = path
+ 
+-        return fs_provider._loc_to_file_path(fs_path, environ)
++        return fs_provider._loc_to_file_path(
++            fs_path, self._fs_environ(environ, fs_provider)
++        )
