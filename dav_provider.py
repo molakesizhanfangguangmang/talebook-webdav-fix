@@ -53,6 +53,13 @@ class UserSyncFilesystemProvider(FilesystemProvider):
         self.set_share_path(share_path)
 
     def _relative_path(self, path):
+        # Some clients encode an already encoded filename (for example %2520).
+        # Decode only the URL path layer until stable, with a small hard limit.
+        for _ in range(3):
+            decoded = unquote(path)
+            if decoded == path:
+                break
+            path = decoded
         if self.url_prefix != "/":
             if path == self.url_prefix:
                 return "/"
