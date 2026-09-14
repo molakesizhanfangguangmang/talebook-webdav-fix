@@ -2,6 +2,7 @@
 import logging
 import os
 import re
+import subprocess
 import time
 from io import BytesIO
 from urllib.parse import unquote
@@ -9,6 +10,38 @@ from urllib.parse import unquote
 from wsgidav.dav_error import DAVError
 from wsgidav.dav_provider import DAVCollection, DAVNonCollection, DAVProvider
 from wsgidav.fs_dav_provider import FilesystemProvider
+
+
+class _ProgressTriggerFile:
+    def __init__(self, fileobj, path):
+        self._file = fileobj
+        self._path = path
+
+    def __getattr__(self, name):
+        return getattr(self._file, name)
+
+    def close(self):
+        self._file.close()
+        _trigger_progress_bridge(self._path)
+
+
+def _trigger_progress_bridge(path):
+    normalized = os.path.normpath(path)
+    if not (normalized.endswith("/moeli_reader/book.db") or
+            ("/legado/bookProgress/" in normalized and normalized.endswith(".json"))):
+        return
+    script = "/opt/reading-progress-bridge/trigger.sh"
+    if not os.path.isfile(script):
+        return
+    try:
+        subprocess.Popen(
+            ["/bin/sh", script, normalized],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except Exception:
+        logging.exception("Could not trigger reading progress bridge for %s", normalized)
+
 
 
 class UserSyncFilesystemProvider(FilesystemProvider):
@@ -32,6 +65,17 @@ class UserSyncFilesystemProvider(FilesystemProvider):
         resource = super().get_resource_inst(self._relative_path(path), environ)
         if resource is not None:
             resource.path = path
+            if resource.path != "/" and hasattr(resource, "begin_write"):
+                original_begin_write = resource.begin_write
+
+                def begin_write(content_type=None):
+                    fileobj = original_begin_write(content_type=content_type)
+                    file_path = resource.provider._loc_to_file_path(
+                        resource.path, resource.environ
+                    )
+                    return _ProgressTriggerFile(fileobj, file_path)
+
+                resource.begin_write = begin_write
         return resource
 
     def _loc_to_file_path(self, path, environ=None):
